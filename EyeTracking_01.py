@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import random
+from sklearn.linear_model import LinearRegression
 
 def verify_camera_works(camera_obj):
     #input: camera object.
@@ -44,8 +45,8 @@ def find_eye(frame, face_hc, eye_hc, verbose):
             cv2.waitKey(5)
         except:
             pass
-    if verbose:
-        print(f"{len(faces)} faces detected. {len(all_eyes)} eyes detected.")
+    #if verbose:
+        #print(f"{len(faces)} faces detected. {len(all_eyes)} eyes detected.")
 
     
     return all_eyes
@@ -53,7 +54,7 @@ def find_eye(frame, face_hc, eye_hc, verbose):
 def find_pupils_blob(eye_clips, blob_detector):
     #input: face cropped
     #returns: pupil locations.
-    crop_ratio = 0.15 #crops 10% from left, right, top, and bottom.
+    crop_ratio = 0.12 #crops 10% from left, right, top, and bottom.
     thresholds = [70,140]
     threshold_increment = 20
     blob_locations = []
@@ -116,34 +117,140 @@ def find_pupils_blob(eye_clips, blob_detector):
     except:
         avg_right_pupil_x_deviation = None
         avg_right_pupil_y_deviation = None
-    print(avg_left_pupil_x_deviation, avg_left_pupil_y_deviation, avg_right_pupil_x_deviation, avg_left_pupil_y_deviation)
+
+    if verbose:
+        print(avg_left_pupil_x_deviation, avg_left_pupil_y_deviation, avg_right_pupil_x_deviation, avg_left_pupil_y_deviation)
     
-    return avg_left_pupil_x_deviation, avg_left_pupil_y_deviation, avg_right_pupil_x_deviation, avg_left_pupil_y_deviation
+    return avg_left_pupil_x_deviation, avg_left_pupil_y_deviation, avg_right_pupil_x_deviation, avg_right_pupil_y_deviation
 
-def generate_direction(eye_center, pupil_center):
-    pass
+def generate_direction(left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y, left_eye_matrix, right_eye_matrix, verbose):
+    estimated_left_dot_x = None
+    estimated_left_dot_y = None
+    estimated_right_dot_x = None
+    estimated_right_dot_y = None
+    if left_pupil_x is None or left_pupil_y is None or right_pupil_x is None or right_pupil_y is None:
+        if verbose:
+            print("Pupil positions are None!")
+        return None, None
+    
+    def apply_transformation(x, y, matrix):
+        point = np.array([[x], [y], [1]])
+        transformed_point = np.dot(matrix, point)
+        return transformed_point[0, 0], transformed_point[1, 0]
+    if not (left_pupil_x is None or left_pupil_y is None):
+        estimated_left_dot_x, estimated_left_dot_y = apply_transformation(left_pupil_x, left_pupil_y, left_eye_matrix[0])
+    if not (right_pupil_x is None or right_pupil_y is None):
+        estimated_right_dot_x, estimated_right_dot_y = apply_transformation(right_pupil_x, right_pupil_y, right_eye_matrix[0])
+    
+    if verbose:
+        print("Estimated Left Dot Position: ", estimated_left_dot_x, estimated_left_dot_y)
+        print("Estimated Right Dot Position: ", estimated_right_dot_x, estimated_right_dot_y)
+    
+    return (estimated_left_dot_x, estimated_left_dot_y), (estimated_right_dot_x, estimated_right_dot_y)
 
-def perform_calibration_via_matrix(calibration_steps):
+
+
+def find_transformation_matrix(eye_offsets, dot_positions, verbose):
+    # Remove data points where any value is None
+    clean_data = [(eo, dp) for eo, dp in zip(eye_offsets, dot_positions) if None not in eo and None not in dp]
+    
+    # Check if we have enough valid data points
+    if len(clean_data) < 3:
+        if verbose:
+            print("Not enough valid data points for calibration!")
+        return None
+    
+    eye_offsets_clean, dot_positions_clean = zip(*clean_data)
+    eye_offsets_clean = np.array(eye_offsets_clean)
+    dot_positions_clean = np.array(dot_positions_clean)
+    
+    transformation_matrices = []
+    
+    for i in range(2):
+        model = LinearRegression().fit(eye_offsets_clean, dot_positions_clean[:, i])
+        transformation_matrix = np.zeros((3, 3))
+        transformation_matrix[0, :-1] = model.coef_
+        transformation_matrix[0, -1] = model.intercept_
+        transformation_matrix[1, 1] = 1
+        transformation_matrix[2, 2] = 1
+        transformation_matrices.append(transformation_matrix)
+        
+    return transformation_matrices
+
+def perform_calibration_via_matrix(calibration_steps, verbose):
+    dot_positions = []
+    left_eye_offsets = []
+    right_eye_offsets = []
     for i in range(calibration_steps):
-        res_x = 3840
-        res_y = 2160
-        rand_x = random.uniform(0,1)
-        rand_y = random.uniform(0,1)
+        res_x = 1920
+        res_y = 1080
+        rand_x = random.uniform(0.02,0.98)
+        rand_y = random.uniform(0.02,0.98)
+        #print(rand_x, rand_y)
         display_text = f"Please look at the red and press any key.\n If no key is pressed, the next image will be shown in 10 seconds"
-        cv2_image = 127*np.zeros((res_x, res_y, 3), dtype=np.uint8)
-        cv2.circle(cv2_image, (int(res_x*rand_x), int(res_y*rand_y)), 15, (0, 0, 255), -1)
+        cv2_image = 90*np.ones((res_x, res_y, 3), dtype=np.uint8)
+        cv2.circle(cv2_image, (int(res_y*rand_y), int(res_x*rand_x)), 5, (0, 0, 255), -1)
+        #cv2_image[]
         cv2.namedWindow("window", cv2.WND_PROP_FULLSCREEN)
         cv2.setWindowProperty("window",cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
         cv2.imshow("window", cv2_image)
+
+        #when a key is pressed, terminate the frame and look for eyes.
         cv2.waitKey(9999)
+        frame = grab_frame(camera_obj)
+        eye_clips = find_eye(frame, face_hc, eye_hc, verbose)
+        left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y = find_pupils_blob(eye_clips, blob_detector)
+        print(left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y)
+        #add the collected data to an array.
+
+        dot_positions.append([rand_x, rand_y])
+        left_eye_offsets.append([left_pupil_x, left_pupil_y])
+        right_eye_offsets.append([right_pupil_x, right_pupil_y])
     cv2.destroyAllWindows()
+
+    #generate transformation matrix to convert eye offsets to an estimated dot position.
+    left_eye_matrix = find_transformation_matrix(left_eye_offsets, dot_positions, verbose)
+    right_eye_matrix = find_transformation_matrix(right_eye_offsets, dot_positions, verbose)
+    if left_eye_matrix is None or right_eye_matrix is None:
+        if verbose:
+            print("Calibration failed due to insufficient valid data points!")
+        return None, None
+    
+    return left_eye_matrix, right_eye_matrix
+
+def plot_results(estimated_left_dot_position, estimated_right_dot_position):
+    res_x = 1920
+    res_y = 1080
+    
+    #print(rand_x, rand_y)
+    display_text = f"Please look at the red and press any key.\n If no key is pressed, the next image will be shown in 10 seconds"
+    cv2_image = 60*np.ones((res_x, res_y, 3), dtype=np.uint8)
+    try:
+        value_right_x = int(res_x * estimated_right_dot_position[0])
+        value_right_y = int(res_y * estimated_right_dot_position[1])
+        cv2.circle(cv2_image, (value_right_y, value_right_x), 50, (0, 0, 255), -1)
+    except:
+        pass
+    try:
+        value_left_x = int(res_x * estimated_left_dot_position[0])
+        value_left_y = int(res_y * estimated_left_dot_position[1])
+        cv2.circle(cv2_image, (value_left_y, value_left_x), 50, (0, 0, 255), -1)
+    except:
+        pass
+    
+    
+    #cv2_image[]
+    cv2.namedWindow("window", cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty("window",cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
+    cv2.imshow("window", cv2_image) 
+
 
 if __name__ == "__main__":
     camera_index = 0
     face_haarcascade_filename = "haarcascade_frontalface_default.xml"
     eye_haarcascade_filename = "haarcascade_eye.xml"
     verbose = True
-    calibration_steps = 5
+    calibration_steps = 10
     
     #don't edit anything after this line.
     camera_obj = cv2.VideoCapture(camera_index)
@@ -165,10 +272,12 @@ if __name__ == "__main__":
             camera_obj = cv2.VideoCapture(camera_index)
             if verify_camera_works(camera_obj):
                 break
-    #perform_calibration_via_matrix(calibration_steps)
+    left_eye_matrix, right_eye_matrix = perform_calibration_via_matrix(calibration_steps, verbose)
             
     for i in range(100000): #not using a while true loop during development.
         frame = grab_frame(camera_obj)
         eye_clips = find_eye(frame, face_hc, eye_hc, verbose)
         left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y = find_pupils_blob(eye_clips, blob_detector)
-        #generate_direction(eye_center,pupil_center)
+        estimated_left_dot_position, estimated_right_dot_position = generate_direction(left_pupil_x, left_pupil_y, right_pupil_x, right_pupil_y, left_eye_matrix, right_eye_matrix, verbose)
+        print(estimated_left_dot_position, estimated_right_dot_position)
+        plot_results(estimated_left_dot_position, estimated_right_dot_position)
